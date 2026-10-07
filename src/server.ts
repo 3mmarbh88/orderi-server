@@ -1,3 +1,4 @@
+import { registerAuthRoutes } from "./auth.js";
 import express, { Request, Response } from "express";
 import dotenv from "dotenv";
 import QRCode from "qrcode";
@@ -60,7 +61,7 @@ const db: SupabaseClient | null =
         }
       })
     : null;
-
+registerAuthRoutes(app, db);
 /* =========================================================
    SSE CLIENTS
 ========================================================= */
