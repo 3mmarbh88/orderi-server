@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bezelGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="30%" stop-color="#e8ecf1"/>
+      <stop offset="100%" stop-color="#94a3b8"/>
+    </linearGradient>
+    <linearGradient id="innerPlateGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="60%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <linearGradient id="islandSurface" x1="15%" y1="0%" x2="85%" y2="100%">
+      <stop offset="0%" stop-color="#6ee7b7"/>
+      <stop offset="30%" stop-color="#34d399"/>
+      <stop offset="70%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="islandExtrudeDark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#047857"/>
+      <stop offset="100%" stop-color="#022c22"/>
+    </linearGradient>
+    <linearGradient id="boxTop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f5d09d"/>
+      <stop offset="100%" stop-color="#dfb278"/>
+    </linearGradient>
+    <linearGradient id="boxLeft" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#d4a367"/>
+      <stop offset="100%" stop-color="#b88347"/>
+    </linearGradient>
+    <linearGradient id="boxRight" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#b07d42"/>
+      <stop offset="100%" stop-color="#8c5d26"/>
+    </linearGradient>
+    <linearGradient id="shieldGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a"/>
+      <stop offset="50%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#b45309"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle Base -->
+  <rect x="48" y="44" width="416" height="416" rx="92" fill="url(#bezelGrad)"/>
+  <rect x="58" y="54" width="396" height="396" rx="82" fill="url(#innerPlateGrad)"/>
+
+  <!-- ADMIN Text -->
+  <text x="96" y="103" font-family="system-ui, sans-serif" font-size="25" font-weight="900" fill="#64748b" letter-spacing="1.5">ADMIN</text>
+
+  <!-- Bahrain Island 3D -->
+  <path d="M 175 270 L 175 298 C 170 338 185 368 195 408 C 195 448 215 483 240 473 C 265 453 285 403 290 363 L 290 335 C 285 375 265 425 240 445 C 215 455 195 420 195 380 C 195 340 180 305 175 270 Z" fill="url(#islandExtrudeDark)"/>
+  <path d="M 235 125 C 275 110 300 135 305 165 C 310 185 295 205 285 230 C 275 255 295 290 290 335 C 285 375 265 425 240 445 C 215 455 195 420 195 380 C 195 340 180 305 175 270 C 170 230 180 185 200 150 Z" fill="url(#islandSurface)"/>
+  
+  <!-- Muharraq Island -->
+  <path d="M 285 85 C 320 75 350 95 345 130 C 335 155 310 150 285 85 Z" fill="url(#islandSurface)"/>
+  
+  <!-- Umm an Nasan -->
+  <ellipse cx="150" cy="180" rx="14" ry="20" fill="url(#islandSurface)"/>
+
+  <!-- Hawar Islands -->
+  <ellipse cx="370" cy="320" rx="9" ry="14" fill="#0d9488"/>
+  <ellipse cx="388" cy="340" rx="12" ry="18" fill="#0d9488"/>
+
+  <!-- Radar Rings -->
+  <ellipse cx="256" cy="245" rx="46" ry="36" fill="none" stroke="#34d399" stroke-width="3" opacity="0.85"/>
+  <ellipse cx="256" cy="245" rx="85" ry="65" fill="none" stroke="#10b981" stroke-width="2.5" opacity="0.75"/>
+  <ellipse cx="256" cy="245" rx="120" ry="92" fill="none" stroke="#34d399" stroke-width="2" opacity="0.5"/>
+
+  <!-- Cardboard Box -->
+  <g transform="translate(215, 195)">
+    <polygon points="40,0 82,22 42,44 0,22" fill="url(#boxTop)"/>
+    <polygon points="0,22 42,44 42,94 0,72" fill="url(#boxLeft)"/>
+    <polygon points="42,44 82,22 82,72 42,94" fill="url(#boxRight)"/>
+    <polygon points="36,2 46,7 26,46 16,41" fill="#fde68a"/>
+    <polygon points="16,41 26,46 26,94 16,90" fill="#fde68a"/>
+  </g>
+
+  <!-- Key with Gold Shield -->
+  <g transform="translate(162, 280)">
+    <path d="M 18 30 L 75 -5" stroke="#cbd5e1" stroke-width="7" stroke-linecap="round"/>
+    <circle cx="16" cy="32" r="22" fill="#ffffff" stroke="#34d399" stroke-width="3"/>
+    <path d="M 16 19 L 26 23 C 26 31 22 38 16 43 C 10 38 6 31 6 23 Z" fill="url(#shieldGold)"/>
+  </g>
+
+  <!-- Admin Panel Badge -->
+  <rect x="300" y="392" width="138" height="42" rx="13" fill="#ffffff" opacity="0.85" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="369" y="418" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12.5" font-weight="900" fill="#334155" letter-spacing="0.8">ADMIN PANEL</text>
+</svg>

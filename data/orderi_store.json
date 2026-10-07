@@ -1,0 +1,49 @@
+{
+  "admin_credentials": {
+    "username": "admin",
+    "password_hash": "610193c04835a205273811cd02e077e762796fadcd1af53ab5f8c4f553785b24",
+    "updated_at": "2026-10-06T14:53:11.368Z"
+  },
+  "app_users": [],
+  "devices": [],
+  "activation_codes": [],
+  "user_subscriptions": [],
+  "orders": [],
+  "system_logs": [],
+  "system_alerts": [],
+  "admin_biometrics": [],
+  "whatsapp_session": {
+    "id": "wa-primary-session",
+    "status": "idle",
+    "qr_code_data_url": null,
+    "pairing_code": "882-194",
+    "connected_phone": null,
+    "connected_at": null,
+    "device_name": "Orderi Server Radar",
+    "battery_level": 100,
+    "groups_monitored_count": 0,
+    "private_chats_monitored_count": 0,
+    "total_orders_captured": 0,
+    "last_sync_at": null,
+    "listener_service_active": true,
+    "updated_at": "2026-10-06T14:53:11.376Z"
+  },
+  "whatsapp_sessions": [
+    {
+      "id": "wa-primary-session",
+      "status": "idle",
+      "qr_code_data_url": null,
+      "pairing_code": "882-194",
+      "connected_phone": null,
+      "connected_at": null,
+      "device_name": "Orderi Server Radar",
+      "battery_level": 100,
+      "groups_monitored_count": 0,
+      "private_chats_monitored_count": 0,
+      "total_orders_captured": 0,
+      "last_sync_at": null,
+      "listener_service_active": true,
+      "updated_at": "2026-10-06T14:53:11.376Z"
+    }
+  ]
+}

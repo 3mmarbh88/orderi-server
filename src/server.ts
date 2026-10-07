@@ -1,38 +1,28 @@
-import "dotenv/config";
-import express, { Request, Response, NextFunction } from "express";
-import crypto from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
+import express, { Request, Response } from "express";
+import dotenv from "dotenv";
+import QRCode from "qrcode";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+
+dotenv.config();
 
 const app = express();
-
-const PORT = Number(process.env.PORT || 10000);
-const SUPABASE_URL = process.env.SUPABASE_URL || "";
-const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || "";
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const PORT = Number(process.env.PORT || 3000);
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
-if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
-  console.error("[Orderi] Missing SUPABASE_URL or SUPABASE_SECRET_KEY");
-  process.exit(1);
-}
-
-const supabase = createClient(
-  SUPABASE_URL,
-  SUPABASE_SECRET_KEY,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  }
-);
-
-app.use(express.json({ limit: "1mb" }));
+/* =========================================================
+   CORS
+========================================================= */
 
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN);
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, apikey, x-orderi-webhook-secret"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
 
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
@@ -41,652 +31,1394 @@ app.use((req, res, next) => {
   next();
 });
 
-function hash(value: string): string {
-  return crypto
-    .createHash("sha256")
-    .update(value)
-    .digest("hex");
+/* =========================================================
+   BODY PARSING
+========================================================= */
+
+app.use(express.json({ limit: "35mb" }));
+app.use(express.urlencoded({ extended: true, limit: "35mb" }));
+
+/* =========================================================
+   SUPABASE
+========================================================= */
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseSecret = process.env.SUPABASE_SECRET_KEY;
+
+if (!supabaseUrl || !supabaseSecret) {
+  console.warn(
+    "[Orderi] SUPABASE_URL / SUPABASE_SECRET_KEY not configured."
+  );
 }
 
-function generateToken(): string {
-  return crypto.randomBytes(48).toString("hex");
-}
+const db: SupabaseClient | null =
+  supabaseUrl && supabaseSecret
+    ? createClient(supabaseUrl, supabaseSecret, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        }
+      })
+    : null;
 
-function generateActivationCode(): string {
-  const part = () =>
-    crypto.randomBytes(3).toString("hex").toUpperCase();
+/* =========================================================
+   SSE CLIENTS
+========================================================= */
 
-  return `ORD-${part()}-${part()}`;
-}
+const sseClients = new Set<Response>();
 
-function normalizeUsername(value: unknown): string {
-  return String(value || "").trim().toLowerCase();
-}
+/* =========================================================
+   WHATSAPP SESSION
+========================================================= */
 
-function getBearerToken(req: Request): string | null {
-  const header = req.headers.authorization || "";
+type Session = {
+  status: "disconnected" | "qr_ready" | "connecting" | "connected";
+  qrCodeDataUrl: string;
+  pairingCode: string;
+  connectedPhone: string | null;
+  connectedAt: string | null;
+  deviceName: string;
+  batteryLevel: number;
+  groupsMonitoredCount: number;
+  privateChatsMonitoredCount: number;
+  totalOrdersCaptured: number;
+  lastSyncAt: string | null;
+  listenerServiceActive: boolean;
+};
 
-  if (!header.toLowerCase().startsWith("bearer ")) {
+let session: Session = {
+  status: "disconnected",
+  qrCodeDataUrl: "",
+  pairingCode: "",
+  connectedPhone: null,
+  connectedAt: null,
+  deviceName: "Orderi Radar Gateway",
+  batteryLevel: 100,
+  groupsMonitoredCount: 0,
+  privateChatsMonitoredCount: 0,
+  totalOrdersCaptured: 0,
+  lastSyncAt: null,
+  listenerServiceActive: true
+};
+
+/* =========================================================
+   DATABASE HELPER
+========================================================= */
+
+function requireDb(res: Response): SupabaseClient | null {
+  if (!db) {
+    res.status(503).json({
+      success: false,
+      error: "Supabase is not configured on the server."
+    });
+
     return null;
   }
 
-  return header.substring(7).trim() || null;
+  return db;
 }
 
-async function getUserFromRequest(req: Request) {
-  const token = getBearerToken(req);
+/* =========================================================
+   BROADCAST
+========================================================= */
 
-  if (!token) {
-    return null;
+function broadcast(payload: unknown) {
+  const event = `data: ${JSON.stringify(payload)}\n\n`;
+
+  for (const client of [...sseClients]) {
+    try {
+      client.write(event);
+    } catch {
+      sseClients.delete(client);
+    }
   }
+}
 
-  const tokenHash = hash(token);
+/* =========================================================
+   SERVER EVENTS
+========================================================= */
 
-  const { data, error } = await supabase
-    .from("auth_sessions")
-    .select(`
-      id,
-      user_id,
-      expires_at,
-      app_users (
-        id,
-        username,
-        phone,
-        is_active
-      )
-    `)
-    .eq("token_hash", tokenHash)
-    .gt("expires_at", new Date().toISOString())
+async function persistEvent(type: string, payload: unknown) {
+  if (!db) return;
+
+  await db.from("server_events").insert({
+    event_type: type,
+    payload
+  });
+}
+
+/* =========================================================
+   WHATSAPP QR
+========================================================= */
+
+async function generateQR() {
+  const token = `ORDERI-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+
+  session.pairingCode = `ORD-973-${Math.floor(
+    1000 + Math.random() * 9000
+  )}`;
+
+  session.qrCodeDataUrl = await QRCode.toDataURL(token, {
+    errorCorrectionLevel: "H",
+    margin: 2,
+    width: 280
+  });
+
+  session.status = "qr_ready";
+
+  await saveSession();
+}
+
+/* =========================================================
+   SAVE WHATSAPP SESSION
+========================================================= */
+
+async function saveSession() {
+  if (!db) return;
+
+  await db.from("whatsapp_sessions").upsert({
+    id: "default",
+    status: session.status,
+    qr_code_data_url: session.qrCodeDataUrl,
+    pairing_code: session.pairingCode,
+    connected_phone: session.connectedPhone,
+    connected_at: session.connectedAt,
+    device_name: session.deviceName,
+    battery_level: session.batteryLevel,
+    groups_monitored_count: session.groupsMonitoredCount,
+    private_chats_monitored_count:
+      session.privateChatsMonitoredCount,
+    total_orders_captured: session.totalOrdersCaptured,
+    last_sync_at: session.lastSyncAt,
+    listener_service_active: session.listenerServiceActive
+  });
+}
+
+/* =========================================================
+   LOAD WHATSAPP SESSION
+========================================================= */
+
+async function loadSession() {
+  if (!db) return;
+
+  const { data } = await db
+    .from("whatsapp_sessions")
+    .select("*")
+    .eq("id", "default")
     .maybeSingle();
 
-  if (error || !data || !data.app_users) {
-    return null;
+  if (!data) {
+    await generateQR();
+    return;
   }
 
-  const user = Array.isArray(data.app_users)
-    ? data.app_users[0]
-    : data.app_users;
+  session = {
+    status: data.status,
+    qrCodeDataUrl: data.qr_code_data_url || "",
+    pairingCode: data.pairing_code || "",
+    connectedPhone: data.connected_phone,
+    connectedAt: data.connected_at,
+    deviceName:
+      data.device_name || "Orderi Radar Gateway",
+    batteryLevel: data.battery_level ?? 100,
+    groupsMonitoredCount:
+      data.groups_monitored_count ?? 0,
+    privateChatsMonitoredCount:
+      data.private_chats_monitored_count ?? 0,
+    totalOrdersCaptured:
+      data.total_orders_captured ?? 0,
+    lastSyncAt: data.last_sync_at,
+    listenerServiceActive:
+      data.listener_service_active ?? true
+  };
 
-  if (!user || !user.is_active) {
-    return null;
+  if (!session.qrCodeDataUrl) {
+    await generateQR();
+  }
+}
+
+/* =========================================================
+   WHATSAPP GROUP INVITE LINKS
+========================================================= */
+
+function extractInviteLinks(text: string) {
+  const found = new Set<string>();
+
+  const re =
+    /(?:https?:\/\/)?(?:chat\.whatsapp\.com|wa\.me\/join)\/([A-Za-z0-9_-]{20,26})/gi;
+
+  for (const m of text.matchAll(re)) {
+    found.add(m[1]);
   }
 
-  await supabase
-    .from("auth_sessions")
-    .update({
-      last_seen_at: new Date().toISOString(),
-    })
-    .eq("id", data.id);
+  return [...found];
+}
+
+/* =========================================================
+   ORDER PARSER
+========================================================= */
+
+function parseOrderText(text: string) {
+  const priceMatch = text.match(
+    /(\d+(?:\.\d+)?)\s*(?:د\.?\s*ب|دينار|BHD|bd)/i
+  );
+
+  const phoneMatch = text.match(
+    /(?:\+?973[\s-]?)?([3567]\d{7})\b/
+  );
+
+  const arrow = text.match(
+    /(.{2,40})\s*(?:إلى|الى|->|→)\s*(.{2,40})/
+  );
+
+  const from =
+    arrow?.[1]
+      ?.replace(/^.*?(?:من|from)\s*/i, "")
+      .trim() || "";
+
+  const to = arrow?.[2]?.trim() || "";
 
   return {
-    sessionId: data.id,
-    user,
+    from,
+    to,
+    price: priceMatch ? Number(priceMatch[1]) : 0,
+    phone: phoneMatch ? phoneMatch[1] : "",
+    confidence: arrow || priceMatch ? 80 : 45
   };
 }
 
-function requireAuth(
-  handler: (req: Request, res: Response) => Promise<any>
-) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const auth = await getUserFromRequest(req);
+/* =========================================================
+   SAVE ORDER
+========================================================= */
 
-      if (!auth) {
-        return res.status(401).json({
-          success: false,
-          error: "Unauthorized",
-        });
-      }
+async function saveOrder(order: any) {
+  if (!db) return;
 
-      (req as any).auth = auth;
-
-      await handler(req, res);
-    } catch (error) {
-      next(error);
-    }
-  };
-}
-
-/* =========================
-   ROOT
-========================= */
-
-app.get("/", (_req, res) => {
-  res.json({
-    service: "Orderi License Server",
-    status: "online",
-    database: "/api/health",
-    version: "1.0.0",
+  await db.from("orders").upsert({
+    id: order.id,
+    from_area: order.from,
+    to_area: order.to,
+    price: order.price,
+    raw_text: order.rawText,
+    group_name: order.groupName,
+    sender_name: order.senderName,
+    sender_phone: order.senderPhone,
+    received_at: order.receivedAt,
+    confidence: order.confidence,
+    type: order.type,
+    notes: order.notes,
+    status: order.status,
+    source: order.source,
+    is_direct_private: order.isDirectPrivate,
+    payload: order
   });
-});
+}
 
-/* =========================
+/* =========================================================
+   SAVE DISCOVERED GROUP LINK
+========================================================= */
+
+async function saveGroupLink(link: any) {
+  if (!db) return;
+
+  await db.from("discovered_group_links").upsert(
+    {
+      id: link.id,
+      invite_code: link.inviteCode,
+      url: link.url,
+      title: link.title,
+      sender_name: link.senderName,
+      sender_phone: link.senderPhone,
+      source_group: link.sourceGroup,
+      raw_text: link.rawText,
+      captured_at: link.capturedAt,
+      status: link.status,
+      is_monitored: link.isMonitored
+    },
+    {
+      onConflict: "invite_code"
+    }
+  );
+}
+
+/* =========================================================
+   CAPTURE INCOMING MESSAGE
+========================================================= */
+
+async function captureIncoming(
+  body: any,
+  query: any = {}
+) {
+  const rawText = String(
+    body.text ??
+      body.message ??
+      body.body ??
+      body.content ??
+      body.notificationText ??
+      body.data ??
+      query.text ??
+      query.message ??
+      ""
+  ).trim();
+
+  if (!rawText) {
+    throw new Error("نص الرسالة فارغ.");
+  }
+
+  const sender = String(
+    body.sender ??
+      body.senderName ??
+      body.title ??
+      body.from_user ??
+      body.notificationTitle ??
+      body.from ??
+      query.sender ??
+      "تاجر واتساب"
+  );
+
+  const group = String(
+    body.group ??
+      body.groupName ??
+      body.subText ??
+      body.notificationSubText ??
+      body.chat ??
+      query.group ??
+      ""
+  );
+
+  const phone = String(
+    body.phone ??
+      body.senderPhone ??
+      body.phoneNumber ??
+      query.phone ??
+      ""
+  );
+
+  const parsed = parseOrderText(rawText);
+
+  /* -------------------------------------------------------
+     GROUP INVITE LINKS
+  ------------------------------------------------------- */
+
+  const links = [];
+
+  for (const code of extractInviteLinks(rawText)) {
+    const link = {
+      id: `grp-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 7)}`,
+
+      url: `https://chat.whatsapp.com/${code}`,
+
+      inviteCode: code,
+
+      title: `قروب توصيل جديد (من ${
+        sender || group
+      })`,
+
+      senderName: sender,
+
+      senderPhone: phone,
+
+      sourceGroup: group || "قروب واتساب",
+
+      rawText,
+
+      capturedAt: new Date().toISOString(),
+
+      status: "new",
+
+      isMonitored: false
+    };
+
+    await saveGroupLink(link);
+
+    links.push(link);
+
+    broadcast({
+      type: "GROUP_LINK_DETECTED",
+      groupLink: link
+    });
+  }
+
+  /* -------------------------------------------------------
+     ORDER
+  ------------------------------------------------------- */
+
+  const isDirect =
+    !group ||
+    group === sender ||
+    /خاص|private|direct/i.test(group);
+
+  const order = {
+    id: `ord-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 7)}`,
+
+    from: parsed.from || "البحرين",
+
+    to: parsed.to || "البحرين",
+
+    price: parsed.price || 0,
+
+    rawText,
+
+    groupName: isDirect
+      ? "محادثة خاصة / تاجر مباشر 👤"
+      : group,
+
+    senderName: sender,
+
+    senderPhone: phone || parsed.phone,
+
+    receivedAt: new Date().toISOString(),
+
+    confidence: parsed.confidence,
+
+    type: isDirect
+      ? "طلب مباشر (خاص)"
+      : "طلب قروب واتساب",
+
+    notes: "تم التقاطه عبر Orderi Server",
+
+    status: "pending",
+
+    source:
+      body.source || "webhook_auto",
+
+    isDirectPrivate: isDirect
+  };
+
+  /* -------------------------------------------------------
+     SAVE ORDER
+  ------------------------------------------------------- */
+
+  if (
+    parsed.from ||
+    parsed.to ||
+    parsed.price
+  ) {
+    await saveOrder(order);
+
+    session.totalOrdersCaptured += 1;
+
+    session.lastSyncAt =
+      new Date().toISOString();
+
+    await saveSession();
+
+    broadcast({
+      type: "NEW_ORDER",
+      order
+    });
+
+    await persistEvent(
+      "NEW_ORDER",
+      order
+    );
+  }
+
+  return {
+    order,
+    groupLinks: links
+  };
+}
+
+/* =========================================================
    HEALTH
-========================= */
+========================================================= */
 
-app.get("/api/health", async (_req, res) => {
-  try {
-    const { error } = await supabase
-      .from("app_users")
-      .select("id", { count: "exact", head: true });
+app.get(
+  "/api/health",
+  async (_req, res) => {
+    let database = false;
 
-    if (error) {
-      return res.status(503).json({
-        status: "error",
-        service: "orderi-server",
-        database: false,
-        error: error.message,
-      });
+    if (db) {
+      const { error } = await db
+        .from("whatsapp_sessions")
+        .select("id")
+        .limit(1);
+
+      database = !error;
     }
 
     res.json({
       status: "ok",
       service: "orderi-server",
-      timestamp: new Date().toISOString(),
-      database: true,
-      liveConnections: 0,
-    });
-  } catch (error) {
-    res.status(503).json({
-      status: "error",
-      service: "orderi-server",
-      database: false,
+      timestamp:
+        new Date().toISOString(),
+      database,
+      liveConnections:
+        sseClients.size
     });
   }
-});
-
-/* =========================
-   REGISTER
-========================= */
-
-app.post("/api/auth/register", async (req, res) => {
-  try {
-    const username = normalizeUsername(req.body?.username);
-    const password = String(req.body?.password || "");
-    const phone = String(req.body?.phone || "").trim();
-
-    if (!username || !password) {
-      return res.status(400).json({
-        success: false,
-        error: "Username and password are required",
-      });
-    }
-
-    if (username.length < 3) {
-      return res.status(400).json({
-        success: false,
-        error: "Username must be at least 3 characters",
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        error: "Password must be at least 6 characters",
-      });
-    }
-
-    const { data: existing } = await supabase
-      .from("app_users")
-      .select("id")
-      .eq("username", username)
-      .maybeSingle();
-
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        error: "Username already exists",
-      });
-    }
-
-    const { data: user, error } = await supabase
-      .from("app_users")
-      .insert({
-        username,
-        password_hash: hash(password),
-        phone: phone || null,
-      })
-      .select("id, username, phone, is_active, created_at")
-      .single();
-
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      message: "Registration successful",
-      user,
-    });
-  } catch (error) {
-    console.error("[Register]", error);
-
-    res.status(500).json({
-      success: false,
-      error: "Registration failed",
-    });
-  }
-});
-
-/* =========================
-   LOGIN
-========================= */
-
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const username = normalizeUsername(req.body?.username);
-    const password = String(req.body?.password || "");
-
-    if (!username || !password) {
-      return res.status(400).json({
-        success: false,
-        error: "Username and password are required",
-      });
-    }
-
-    const { data: user, error } = await supabase
-      .from("app_users")
-      .select("id, username, phone, is_active, password_hash")
-      .eq("username", username)
-      .maybeSingle();
-
-    if (error || !user) {
-      return res.status(401).json({
-        success: false,
-        error: "Invalid username or password",
-      });
-    }
-
-    if (!user.is_active) {
-      return res.status(403).json({
-        success: false,
-        error: "Account disabled",
-      });
-    }
-
-    if (hash(password) !== user.password_hash) {
-      return res.status(401).json({
-        success: false,
-        error: "Invalid username or password",
-      });
-    }
-
-    const token = generateToken();
-    const expiresAt = new Date(
-      Date.now() + 30 * 24 * 60 * 60 * 1000
-    );
-
-    const { error: sessionError } = await supabase
-      .from("auth_sessions")
-      .insert({
-        user_id: user.id,
-        token_hash: hash(token),
-        expires_at: expiresAt.toISOString(),
-        last_seen_at: new Date().toISOString(),
-      });
-
-    if (sessionError) {
-      return res.status(500).json({
-        success: false,
-        error: sessionError.message,
-      });
-    }
-
-    delete (user as any).password_hash;
-
-    res.json({
-      success: true,
-      token,
-      expires_at: expiresAt.toISOString(),
-      user,
-    });
-  } catch (error) {
-    console.error("[Login]", error);
-
-    res.status(500).json({
-      success: false,
-      error: "Login failed",
-    });
-  }
-});
-
-/* =========================
-   ME
-========================= */
-
-app.get(
-  "/api/auth/me",
-  requireAuth(async (req, res) => {
-    const auth = (req as any).auth;
-
-    res.json({
-      success: true,
-      user: auth.user,
-    });
-  })
 );
 
-/* =========================
-   ACTIVATE
-========================= */
+/* =========================================================
+   WHATSAPP SSE STREAM
+========================================================= */
 
-app.post(
-  "/api/auth/activate",
-  requireAuth(async (req, res) => {
-    const auth = (req as any).auth;
-    const code = String(req.body?.code || "").trim().toUpperCase();
-
-    if (!code) {
-      return res.status(400).json({
-        success: false,
-        error: "Activation code is required",
-      });
-    }
-
-    const { data: activation, error } = await supabase
-      .from("activation_codes")
-      .select("*")
-      .eq("code", code)
-      .maybeSingle();
-
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    if (!activation) {
-      return res.status(404).json({
-        success: false,
-        error: "Invalid activation code",
-      });
-    }
-
-    if (activation.is_used) {
-      return res.status(409).json({
-        success: false,
-        error: "Activation code already used",
-      });
-    }
-
-    const now = new Date();
-    const expiresAt = new Date(
-      now.getTime() +
-      Number(activation.duration_days || 30) *
-      24 *
-      60 *
-      60 *
-      1000
+app.get(
+  "/api/whatsapp/stream",
+  async (req, res) => {
+    res.setHeader(
+      "Content-Type",
+      "text/event-stream"
     );
 
-    const { error: codeError } = await supabase
-      .from("activation_codes")
-      .update({
-        is_used: true,
-        used_by: auth.user.id,
-        used_at: now.toISOString(),
-        expires_at: expiresAt.toISOString(),
-      })
-      .eq("id", activation.id)
-      .eq("is_used", false);
+    res.setHeader(
+      "Cache-Control",
+      "no-cache, no-transform"
+    );
 
-    if (codeError) {
-      return res.status(500).json({
-        success: false,
-        error: codeError.message,
-      });
-    }
+    res.setHeader(
+      "Connection",
+      "keep-alive"
+    );
 
-    const { data: subscription, error: subscriptionError } =
-      await supabase
-        .from("user_subscriptions")
-        .upsert(
-          {
-            user_id: auth.user.id,
-            activation_code_id: activation.id,
-            starts_at: now.toISOString(),
-            expires_at: expiresAt.toISOString(),
-            is_active: true,
-            updated_at: now.toISOString(),
-          },
-          {
-            onConflict: "user_id",
-          }
-        )
+    res.setHeader(
+      "X-Accel-Buffering",
+      "no"
+    );
+
+    res.flushHeaders();
+
+    sseClients.add(res);
+
+    let recentOrders: any[] = [];
+
+    if (db) {
+      const { data } = await db
+        .from("orders")
         .select("*")
-        .single();
-
-    if (subscriptionError) {
-      return res.status(500).json({
-        success: false,
-        error: subscriptionError.message,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Activation successful",
-      subscription,
-    });
-  })
-);
-
-/* =========================
-   SUBSCRIPTION
-========================= */
-
-app.get(
-  "/api/auth/subscription",
-  requireAuth(async (req, res) => {
-    const auth = (req as any).auth;
-
-    const { data: subscription, error } = await supabase
-      .from("user_subscriptions")
-      .select("*")
-      .eq("user_id", auth.user.id)
-      .maybeSingle();
-
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    if (!subscription) {
-      return res.json({
-        success: true,
-        active: false,
-        subscription: null,
-      });
-    }
-
-    const active =
-      Boolean(subscription.is_active) &&
-      new Date(subscription.expires_at).getTime() > Date.now();
-
-    if (!active && subscription.is_active) {
-      await supabase
-        .from("user_subscriptions")
-        .update({
-          is_active: false,
-          updated_at: new Date().toISOString(),
+        .order("received_at", {
+          ascending: false
         })
-        .eq("id", subscription.id);
+        .limit(10);
+
+      recentOrders = (data || []).map(
+        (o: any) => ({
+          id: o.id,
+          from: o.from_area,
+          to: o.to_area,
+          price: Number(o.price),
+          rawText: o.raw_text,
+          groupName: o.group_name,
+          senderName: o.sender_name,
+          senderPhone: o.sender_phone,
+          receivedAt: o.received_at,
+          confidence: o.confidence,
+          type: o.type,
+          notes: o.notes,
+          status: o.status,
+          source: o.source,
+          isDirectPrivate:
+            o.is_direct_private
+        })
+      );
     }
 
-    res.json({
-      success: true,
-      active,
-      subscription: {
-        ...subscription,
-        is_active: active,
-      },
+    res.write(
+      `data: ${JSON.stringify({
+        type: "CONNECTED",
+        connectedAt:
+          new Date().toISOString(),
+        clientsCount:
+          sseClients.size,
+        recentOrders
+      })}\n\n`
+    );
+
+    const heartbeat =
+      setInterval(() => {
+        try {
+          res.write(
+            `: ping ${Date.now()}\n\n`
+          );
+        } catch {
+          clearInterval(heartbeat);
+          sseClients.delete(res);
+        }
+      }, 20000);
+
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
     });
-  })
+  }
 );
 
-/* =========================
-   LOGOUT
-========================= */
+/* =========================================================
+   WEBHOOK
+========================================================= */
 
-app.post(
-  "/api/auth/logout",
-  requireAuth(async (req, res) => {
-    const auth = (req as any).auth;
-
-    await supabase
-      .from("auth_sessions")
-      .delete()
-      .eq("id", auth.sessionId);
-
-    res.json({
-      success: true,
-      message: "Logged out",
-    });
-  })
-);
-
-/* =========================
-   ADMIN AUTH
-========================= */
-
-function requireAdmin(
-  handler: (req: Request, res: Response) => Promise<any>
+async function handleWebhook(
+  req: Request,
+  res: Response
 ) {
-  return async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const token = String(req.headers["x-admin-token"] || "");
+  const expected =
+    process.env.ORDERI_WEBHOOK_SECRET;
 
-      if (!ADMIN_TOKEN || token !== ADMIN_TOKEN) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid admin token",
-        });
-      }
+  if (
+    expected &&
+    req.headers[
+      "x-orderi-webhook-secret"
+    ] !== expected
+  ) {
+    return res.status(401).json({
+      success: false,
+      error: "Invalid webhook secret"
+    });
+  }
 
-      await handler(req, res);
-    } catch (error) {
-      next(error);
-    }
-  };
+  try {
+    const result =
+      await captureIncoming(
+        req.body || {},
+        req.query || {}
+      );
+
+    res.json({
+      success: true,
+      message:
+        "تم استلام الرسالة ومعالجتها",
+      ...result,
+      clientsNotified:
+        sseClients.size
+    });
+  } catch (e: any) {
+    res.status(400).json({
+      success: false,
+      error:
+        e?.message ||
+        "Webhook error"
+    });
+  }
 }
 
-/* =========================
-   CREATE ACTIVATION CODE
-========================= */
-
 app.post(
-  "/api/admin/activation-codes",
-  requireAdmin(async (req, res) => {
-    const durationDays = Math.max(
-      1,
-      Number(req.body?.duration_days || 30)
-    );
-
-    let code = "";
-
-    for (let i = 0; i < 5; i++) {
-      const candidate = generateActivationCode();
-
-      const { data: existing } = await supabase
-        .from("activation_codes")
-        .select("id")
-        .eq("code", candidate)
-        .maybeSingle();
-
-      if (!existing) {
-        code = candidate;
-        break;
-      }
-    }
-
-    if (!code) {
-      return res.status(500).json({
-        success: false,
-        error: "Could not generate unique code",
-      });
-    }
-
-    const { data, error } = await supabase
-      .from("activation_codes")
-      .insert({
-        code,
-        duration_days: durationDays,
-      })
-      .select("*")
-      .single();
-
-    if (error) {
-      return res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      activation_code: data,
-    });
-  })
+  "/api/whatsapp/webhook",
+  handleWebhook
 );
 
-/* =========================
-   LIST ACTIVATION CODES
-========================= */
+app.post(
+  "/api/orders/webhook",
+  handleWebhook
+);
 
 app.get(
-  "/api/admin/activation-codes",
-  requireAdmin(async (_req, res) => {
-    const { data, error } = await supabase
-      .from("activation_codes")
-      .select("*")
-      .order("created_at", { ascending: false });
+  "/api/whatsapp/webhook",
+  handleWebhook
+);
+
+/* =========================================================
+   ANDROID NOTIFICATION LISTENER
+========================================================= */
+
+app.post(
+  "/api/android/notifications",
+  async (req, res) => {
+    req.body = {
+      ...req.body,
+      source:
+        "android_notification_listener"
+    };
+
+    return handleWebhook(req, res);
+  }
+);
+
+/* =========================================================
+   ANDROID LISTENER CONFIG
+========================================================= */
+
+app.get(
+  "/api/android/listener-config",
+  (req, res) => {
+    const protocol =
+      req.headers[
+        "x-forwarded-proto"
+      ] === "https"
+        ? "https"
+        : req.protocol;
+
+    const host =
+      req.get("host") ||
+      `localhost:${PORT}`;
+
+    const endpointUrl =
+      `${protocol}://${host}/api/android/notifications`;
+
+    res.json({
+      appName:
+        "Orderi Radar Android Bridge",
+
+      targetPackage:
+        "com.whatsapp",
+
+      targetPackageBusiness:
+        "com.whatsapp.w4b",
+
+      endpointUrl,
+
+      method: "POST",
+
+      headers: {
+        "Content-Type":
+          "application/json"
+      }
+    });
+  }
+);
+
+/* =========================================================
+   WHATSAPP STATUS
+========================================================= */
+
+app.get(
+  "/api/whatsapp/status",
+  async (_req, res) => {
+    let count = 0;
+
+    if (db) {
+      const { count: c } =
+        await db
+          .from("orders")
+          .select("*", {
+            count: "exact",
+            head: true
+          });
+
+      count = c || 0;
+    }
+
+    res.json({
+      status: "active",
+
+      session:
+        session.status,
+
+      liveConnections:
+        sseClients.size,
+
+      recentWebhookOrdersCount:
+        count,
+
+      timestamp:
+        new Date().toISOString()
+    });
+  }
+);
+
+/* =========================================================
+   RECENT ORDERS
+========================================================= */
+
+app.get(
+  "/api/whatsapp/recent",
+  async (_req, res) => {
+    const database =
+      requireDb(res);
+
+    if (!database) return;
+
+    const { data, error } =
+      await database
+        .from("orders")
+        .select("*")
+        .order("received_at", {
+          ascending: false
+        })
+        .limit(50);
 
     if (error) {
       return res.status(500).json({
         success: false,
-        error: error.message,
+        error: error.message
       });
     }
 
     res.json({
       success: true,
-      activation_codes: data,
-    });
-  })
-);
 
-/* =========================
-   ERROR HANDLER
-========================= */
-
-app.use(
-  (
-    error: any,
-    _req: Request,
-    res: Response,
-    _next: NextFunction
-  ) => {
-    console.error("[Server Error]", error);
-
-    res.status(500).json({
-      success: false,
-      error: "Internal server error",
+      orders: (data || []).map(
+        (o: any) => ({
+          id: o.id,
+          from: o.from_area,
+          to: o.to_area,
+          price: Number(o.price),
+          rawText: o.raw_text,
+          groupName: o.group_name,
+          senderName: o.sender_name,
+          senderPhone:
+            o.sender_phone,
+          receivedAt:
+            o.received_at,
+          confidence:
+            o.confidence,
+          type: o.type,
+          notes: o.notes,
+          status: o.status,
+          source: o.source,
+          isDirectPrivate:
+            o.is_direct_private
+        })
+      )
     });
   }
 );
 
-/* =========================
-   START
-========================= */
+/* =========================================================
+   DISCOVERED WHATSAPP GROUPS
+========================================================= */
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[Orderi] License Server listening on 0.0.0.0:${PORT}`);
-  console.log("[Orderi] Supabase: configured");
-  console.log("[Orderi] Authentication + Activation server ready.");
+app.get(
+  "/api/whatsapp/discovered-groups",
+  async (_req, res) => {
+    const database =
+      requireDb(res);
+
+    if (!database) return;
+
+    const { data, error } =
+      await database
+        .from("discovered_group_links")
+        .select("*")
+        .order("captured_at", {
+          ascending: false
+        })
+        .limit(100);
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+
+    res.json({
+      success: true,
+
+      groupLinks: (data || []).map(
+        (g: any) => ({
+          id: g.id,
+          url: g.url,
+          inviteCode:
+            g.invite_code,
+          title: g.title,
+          senderName:
+            g.sender_name,
+          senderPhone:
+            g.sender_phone,
+          sourceGroup:
+            g.source_group,
+          rawText:
+            g.raw_text,
+          capturedAt:
+            g.captured_at,
+          status:
+            g.status,
+          isMonitored:
+            g.is_monitored
+        })
+      )
+    });
+  }
+);
+
+/* =========================================================
+   BROADCAST REPLY
+========================================================= */
+
+app.post(
+  "/api/whatsapp/broadcast-reply",
+  async (req, res) => {
+    const {
+      broadcastId,
+      replyText,
+      targetGroups = [],
+      originalText = ""
+    } = req.body || {};
+
+    if (!replyText?.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "نص الرد فارغ."
+      });
+    }
+
+    const payload = {
+      type:
+        "BROADCAST_REPLY_SENT",
+
+      broadcastId:
+        broadcastId ||
+        `bcast-${Date.now()}`,
+
+      replyText:
+        replyText.trim(),
+
+      targetGroups:
+        Array.isArray(targetGroups)
+          ? targetGroups
+          : [targetGroups],
+
+      originalText,
+
+      sentAt:
+        new Date().toISOString(),
+
+      isGatewayConnected:
+        session.status ===
+        "connected"
+    };
+
+    if (db) {
+      await db
+        .from("broadcasts")
+        .upsert({
+          id:
+            payload.broadcastId,
+
+          reply_text:
+            payload.replyText,
+
+          target_groups:
+            payload.targetGroups,
+
+          original_text:
+            payload.originalText,
+
+          sent_at:
+            payload.sentAt
+        });
+    }
+
+    broadcast(payload);
+
+    await persistEvent(
+      "BROADCAST_REPLY_SENT",
+      payload
+    );
+
+    res.json({
+      success: true,
+
+      message:
+        session.status === "connected"
+          ? "تم تجهيز الرد عبر جلسة واتساب المتصلة."
+          : "تم حفظ الرد وإرساله إلى عملاء Orderi المتصلين.",
+
+      ...payload,
+
+      clientsNotified:
+        sseClients.size
+    });
+  }
+);
+
+/* =========================================================
+   WHATSAPP SESSION
+========================================================= */
+
+app.get(
+  "/api/whatsapp/session",
+  async (_req, res) => {
+    if (!session.qrCodeDataUrl) {
+      await generateQR();
+    }
+
+    res.json({
+      success: true,
+
+      session: {
+        ...session,
+        liveClients:
+          sseClients.size
+      }
+    });
+  }
+);
+
+/* =========================================================
+   REFRESH QR
+========================================================= */
+
+app.post(
+  "/api/whatsapp/session/refresh-qr",
+  async (_req, res) => {
+    await generateQR();
+
+    broadcast({
+      type:
+        "SESSION_QR_REFRESHED",
+      session
+    });
+
+    res.json({
+      success: true,
+      message:
+        "تم توليد QR جديد",
+      session
+    });
+  }
+);
+
+/* =========================================================
+   PAIR WHATSAPP SESSION
+========================================================= */
+
+app.post(
+  "/api/whatsapp/session/pair",
+  async (req, res) => {
+    session.status =
+      "connected";
+
+    session.connectedPhone =
+      req.body?.phoneNumber ||
+      null;
+
+    session.connectedAt =
+      new Date().toISOString();
+
+    session.deviceName =
+      req.body?.deviceName ||
+      "Orderi Radar Gateway";
+
+    session.lastSyncAt =
+      new Date().toISOString();
+
+    await saveSession();
+
+    const payload = {
+      type:
+        "SESSION_CONNECTED",
+      session
+    };
+
+    broadcast(payload);
+
+    res.json({
+      success: true,
+
+      message:
+        "تم تسجيل حالة الجلسة كمتصلة.",
+
+      session
+    });
+  }
+);
+
+/* =========================================================
+   DISCONNECT WHATSAPP
+========================================================= */
+
+app.post(
+  "/api/whatsapp/session/disconnect",
+  async (_req, res) => {
+    session.status =
+      "disconnected";
+
+    session.connectedPhone =
+      null;
+
+    session.connectedAt =
+      null;
+
+    await generateQR();
+
+    broadcast({
+      type:
+        "SESSION_DISCONNECTED",
+      session
+    });
+
+    res.json({
+      success: true,
+
+      message:
+        "تم فصل الجلسة وتوليد QR جديد.",
+
+      session
+    });
+  }
+);
+
+/* =========================================================
+   AI ORDER MATCHING
+========================================================= */
+
+app.post(
+  "/api/ai/evaluate-match",
+  async (req, res) => {
+    const b = req.body || {};
+
+    const price =
+      Number(b.price || 0);
+
+    const filter =
+      b.filter || {};
+
+    const minPrice =
+      Number(
+        filter.minimumPrice ?? 2
+      );
+
+    const from =
+      String(b.from || "");
+
+    const to =
+      String(b.to || "");
+
+    const startAreas =
+      Array.isArray(
+        filter.startAreas
+      )
+        ? filter.startAreas
+        : [];
+
+    const destinations =
+      Array.isArray(
+        filter.destinations
+      )
+        ? filter.destinations
+        : [];
+
+    let score = 60;
+
+    const matched: string[] = [];
+    const unmatched: string[] = [];
+    const redFlags: string[] = [];
+
+    /* -------------------------------------------------------
+       PRICE
+    ------------------------------------------------------- */
+
+    if (price >= minPrice) {
+      score += 20;
+
+      matched.push(
+        `السعر ${price} د.ب يحقق الحد الأدنى ${minPrice} د.ب`
+      );
+    } else {
+      score -= 20;
+
+      unmatched.push(
+        `السعر ${price} د.ب أقل من الحد الأدنى ${minPrice} د.ب`
+      );
+    }
+
+    /* -------------------------------------------------------
+       START AREA
+    ------------------------------------------------------- */
+
+    if (
+      !startAreas.length ||
+      startAreas.some(
+        (x: string) =>
+          from.includes(x) ||
+          x.includes(from)
+      )
+    ) {
+      score += 10;
+
+      matched.push(
+        "منطقة الاستلام متوافقة"
+      );
+    } else {
+      unmatched.push(
+        "منطقة الاستلام خارج التفضيلات"
+      );
+    }
+
+    /* -------------------------------------------------------
+       DESTINATION
+    ------------------------------------------------------- */
+
+    if (
+      !destinations.length ||
+      destinations.some(
+        (x: string) =>
+          to.includes(x) ||
+          x.includes(to)
+      )
+    ) {
+      score += 10;
+
+      matched.push(
+        "الوجهة متوافقة"
+      );
+    } else {
+      unmatched.push(
+        "الوجهة خارج التفضيلات"
+      );
+    }
+
+    score = Math.max(
+      0,
+      Math.min(100, score)
+    );
+
+    const verdict =
+      score >= 90
+        ? "excellent"
+        : score >= 75
+        ? "good"
+        : score >= 50
+        ? "warning"
+        : "rejected";
+
+    res.json({
+      success: true,
+
+      data: {
+        score,
+
+        verdict,
+
+        verdictLabel:
+          verdict === "excellent"
+            ? "مطابق ومربح جداً ⭐"
+            : verdict === "good"
+            ? "مطابق ومناسب ✓"
+            : verdict === "warning"
+            ? "مطابق جزئياً مع محاذير ⚠️"
+            : "غير مطابق لشروطك ❌",
+
+        summary:
+          `تم تقييم الطلب بنسبة ${score}% بناءً على السعر والمناطق.`,
+
+        matchedConditions:
+          matched,
+
+        unmatchedConditions:
+          unmatched,
+
+        redFlags,
+
+        captainAdvice:
+          score >= 75
+            ? "الطلب مناسب للقبول."
+            : "راجع السعر والمسافة قبل القبول.",
+
+        detectedDetails: {
+          itemType:
+            "شحنة عامة",
+
+          urgency:
+            /عاجل|فوري|حالا|حالاً/.test(
+              String(
+                b.rawText || ""
+              )
+            )
+              ? "فوري"
+              : "اعتيادي",
+
+          paymentMethod:
+            /بنفت|BenefitPay/i.test(
+              String(
+                b.rawText || ""
+              )
+            )
+              ? "BenefitPay"
+              : /كاش|نقد/i.test(
+                  String(
+                    b.rawText || ""
+                  )
+                )
+              ? "كاش"
+              : "غير محدد",
+
+          specialNotes: ""
+        },
+
+        analyzedAt:
+          new Date().toISOString()
+      }
+    });
+  }
+);
+
+/* =========================================================
+   ROOT
+========================================================= */
+
+app.get(
+  "/",
+  (_req, res) => {
+    res.type("html").send(`
+      <html dir="rtl">
+        <head>
+          <meta charset="utf-8">
+          <title>Orderi Server</title>
+
+          <style>
+            body {
+              font-family: Arial;
+              background: #f7f7f7;
+              padding: 40px;
+            }
+
+            code {
+              background: #eee;
+              padding: 4px 8px;
+              border-radius: 6px;
+            }
+          </style>
+        </head>
+
+        <body>
+          <h1>Orderi Server</h1>
+
+          <p>
+            الحالة:
+            <b>Online</b>
+          </p>
+
+          <p>
+            Database:
+            <code>/api/health</code>
+          </p>
+
+          <p>
+            SSE:
+            <code>/api/whatsapp/stream</code>
+          </p>
+        </body>
+      </html>
+    `);
+  }
+);
+
+/* =========================================================
+   BOOT
+========================================================= */
+
+async function boot() {
+  await loadSession();
+
+  app.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `[Orderi] server listening on 0.0.0.0:${PORT}`
+      );
+
+      console.log(
+        `[Orderi] Supabase: ${
+          db
+            ? "configured"
+            : "NOT configured"
+        }`
+      );
+    }
+  );
+}
+
+boot().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });

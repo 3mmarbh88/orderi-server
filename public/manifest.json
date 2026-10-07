@@ -1,0 +1,23 @@
+{
+  "name": "Orderi Server - إدارة البرنامج",
+  "short_name": "Orderi Admin",
+  "description": "لوحة الإدارة والتحكم المركزية لمنظومة Orderi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/orderi-admin-logo.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64 32x32",
+      "type": "image/svg+xml"
+    }
+  ]
+}

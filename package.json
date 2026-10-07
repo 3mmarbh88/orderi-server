@@ -24,10 +24,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "description": "هذا هو backend مستقل لتطبيق Orderi.",
-  "main": "server.js",
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
+  }
 }
