@@ -299,26 +299,79 @@ function parseOrderText(text: string) {
 async function saveOrder(order: any) {
   if (!db) return;
 
-  await db.from("orders").upsert({
-    id: order.id,
-    from_area: order.from,
-    to_area: order.to,
-    price: order.price,
-    raw_text: order.rawText,
-    group_name: order.groupName,
-    sender_name: order.senderName,
-    sender_phone: order.senderPhone,
-    received_at: order.receivedAt,
-    confidence: order.confidence,
-    type: order.type,
-    notes: order.notes,
-    status: order.status,
-    source: order.source,
-    is_direct_private: order.isDirectPrivate,
-    payload: order
-  });
-}
+  const now =
+    order.receivedAt ||
+    new Date().toISOString();
 
+  const { error } = await db
+    .from("orders")
+    .insert({
+      source: order.source || "webhook_auto",
+
+      source_group:
+        order.groupName || null,
+
+      pickup_area:
+        order.from || "البحرين",
+
+      pickup_lat:
+        order.pickupLat ?? null,
+
+      pickup_lng:
+        order.pickupLng ?? null,
+
+      destination:
+        order.to || null,
+
+      price:
+        Number(order.price) || 0,
+
+      distance_km:
+        order.distanceKm ?? null,
+
+      raw_text:
+        order.rawText || null,
+
+      status:
+        order.status || "pending",
+
+      created_at:
+        now,
+
+      updated_at:
+        now,
+
+      received_at:
+        now,
+
+      captain_id:
+        order.captainId || null,
+
+      from_area:
+        order.from || "البحرين",
+
+      to_area:
+        order.to || "البحرين",
+
+      group_name:
+        order.groupName || null,
+
+      sender_name:
+        order.senderName || null,
+
+      sender_phone:
+        order.senderPhone || null
+    });
+
+  if (error) {
+    console.error(
+      "[Orderi] Failed to save order:",
+      error
+    );
+
+    throw error;
+  }
+}
 /* =========================================================
    SAVE DISCOVERED GROUP LINK
 ========================================================= */
