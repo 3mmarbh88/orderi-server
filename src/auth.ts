@@ -46,7 +46,7 @@ function scryptAsync(password: string, salt: Buffer): Promise<Buffer> {
 async function hashPassword(password: string): Promise<string> {
   const salt = crypto.randomBytes(16);
   const derivedKey = await scryptAsync(password, salt);
-  return `scrypt${salt.toString("hex")}${derivedKey.toString("hex")}`;
+  return `scrypt$${salt.toString("hex")}$${derivedKey.toString("hex")}`;
 }
 
 async function verifyPassword(
