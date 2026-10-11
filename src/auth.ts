@@ -24,11 +24,62 @@ function normalizePhone(value: unknown): string {
   return phone;
 }
 
-function hashPassword(password: string): string {
-  return crypto
-    .createHash("sha256")
-    .update(password)
-    .digest("hex");
+const SCRYPT_KEY_LENGTH = 64;
+
+function scryptAsync(password: string, salt: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, SCRYPT_KEY_LENGTH, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(derivedKey as Buffer);
+    });
+  });
+}
+
+/**
+ * New passwords use scrypt with a random per-password salt.
+ * The SHA-256 fallback below exists only to migrate existing accounts
+ * after a successful login, without forcing password resets.
+ */
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.randomBytes(16);
+  const derivedKey = await scryptAsync(password, salt);
+  return `scrypt$${salt.toString("hex")}$${derivedKey.toString("hex")}`;
+}
+
+async function verifyPassword(
+  password: string,
+  storedHash: string
+): Promise<{ valid: boolean; needsUpgrade: boolean }> {
+  if (storedHash.startsWith("scrypt$")) {
+    const parts = storedHash.split("$");
+    if (parts.length !== 3 || !/^[a-f0-9]{32}$/i.test(parts[1]) ||
+        !/^[a-f0-9]{128}$/i.test(parts[2])) {
+      return { valid: false, needsUpgrade: false };
+    }
+
+    const salt = Buffer.from(parts[1], "hex");
+    const expected = Buffer.from(parts[2], "hex");
+    const actual = await scryptAsync(password, salt);
+    return {
+      valid: actual.length === expected.length &&
+        crypto.timingSafeEqual(actual, expected),
+      needsUpgrade: false
+    };
+  }
+
+  // Legacy SHA-256 compatibility. Successful logins are upgraded to scrypt.
+  if (!/^[a-f0-9]{64}$/i.test(storedHash)) {
+    return { valid: false, needsUpgrade: false };
+  }
+  const expected = Buffer.from(storedHash, "hex");
+  const actual = crypto.createHash("sha256").update(password).digest();
+  return {
+    valid: crypto.timingSafeEqual(actual, expected),
+    needsUpgrade: true
+  };
 }
 
 function generateToken(): string {
@@ -239,7 +290,7 @@ export function registerAuthRoutes(
                 captainName,
 
               password_hash:
-                hashPassword(
+                await hashPassword(
                   String(password)
                 ),
 
@@ -359,20 +410,32 @@ export function registerAuthRoutes(
           });
         }
 
-        const passwordHash =
-          hashPassword(
-            String(password)
-          );
+        const passwordCheck = await verifyPassword(
+          String(password),
+          String(captain.password_hash || "")
+        );
 
-        if (
-          passwordHash !==
-          captain.password_hash
-        ) {
+        if (!passwordCheck.valid) {
           return res.status(401).json({
             success: false,
             error:
               "رقم الهاتف أو كلمة المرور غير صحيحة."
           });
+        }
+
+        if (passwordCheck.needsUpgrade) {
+          const upgradedHash = await hashPassword(String(password));
+          const { error: upgradeError } = await db
+            .from("captains")
+            .update({ password_hash: upgradedHash })
+            .eq("id", captain.id);
+
+          if (upgradeError) {
+            return res.status(500).json({
+              success: false,
+              error: "تعذر تحديث حماية كلمة المرور. يرجى المحاولة مرة أخرى."
+            });
+          }
         }
 
         const token =
