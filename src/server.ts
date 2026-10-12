@@ -1261,16 +1261,47 @@ app.post("/api/ai/classify-whatsapp-order", async (req: Request, res: Response) 
 ${JSON.stringify(rawText)}
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.1,
-      },
-    });
+    let responseText = "";
+    let lastError: unknown;
 
-    const parsed: unknown = JSON.parse(response.text || "{}");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.8-flash",
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.1,
+          },
+        });
+
+        responseText = response.text || "{}";
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+
+        const message =
+          error instanceof Error ? error.message : String(error);
+
+        const retryable =
+          /503|UNAVAILABLE|429|RESOURCE_EXHAUSTED|500|INTERNAL|504|DEADLINE_EXCEEDED/i.test(message);
+
+        if (!retryable || attempt === 2) {
+          throw error;
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, 800 * (attempt + 1)),
+        );
+      }
+    }
+
+    if (lastError !== undefined) {
+      throw lastError;
+    }
+
+    const parsed: unknown = JSON.parse(responseText || "{}");
 
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return res.status(502).json({
