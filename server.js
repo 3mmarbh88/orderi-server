@@ -242,6 +242,86 @@ app.delete("/api/orders/:id", async (req, res) => {
   });
 });
 
+
+/**
+ * Per-captain closure vocabulary sync. Only phrase/category/meaning are stored;
+ * raw WhatsApp source messages are intentionally never accepted or persisted.
+ */
+const closureCategories = new Set(["taken", "completion", "gratitude", "emoji"]);
+
+app.get("/api/closure-expressions", async (req, res) => {
+  const captainPhone = String(req.query.captainPhone || "").replace(/[^0-9]/g, "").slice(-15);
+  if (!captainPhone) return res.status(400).json({ error: "captainPhone is required" });
+
+  try {
+    const { data, error } = await supabase
+      .from("closure_expressions")
+      .select("id, phrase, category, meaning, confidence, learned_at, is_ai_learned")
+      .eq("captain_phone", captainPhone)
+      .order("updated_at", { ascending: false })
+      .limit(500);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, expressions: data || [] });
+  } catch (error) {
+    res.status(500).json({ error: "Unable to load closure expressions" });
+  }
+});
+
+app.post("/api/closure-expressions", async (req, res) => {
+  const body = req.body || {};
+  const captainPhone = String(body.captainPhone || "").replace(/[^0-9]/g, "").slice(-15);
+  const phrase = typeof body.phrase === "string" ? body.phrase.trim().slice(0, 80) : "";
+  const category = String(body.category || "");
+  const meaning = typeof body.meaning === "string" ? body.meaning.trim().slice(0, 240) : "";
+  const confidence = Math.max(0, Math.min(100, Number(body.confidence) || 0));
+
+  if (!captainPhone || !phrase || !closureCategories.has(category)) {
+    return res.status(400).json({ error: "captainPhone, phrase and a valid category are required" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("closure_expressions")
+      .upsert({
+        captain_phone: captainPhone,
+        phrase,
+        category,
+        meaning,
+        confidence,
+        learned_at: typeof body.learnedAt === "string" ? body.learnedAt : new Date().toISOString(),
+        is_ai_learned: Boolean(body.isAiLearned),
+        updated_at: new Date().toISOString()
+      }, { onConflict: "captain_phone,phrase" })
+      .select("id, phrase, category, meaning, confidence, learned_at, is_ai_learned")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true, expression: data });
+  } catch (error) {
+    res.status(500).json({ error: "Unable to save closure expression" });
+  }
+});
+
+app.delete("/api/closure-expressions", async (req, res) => {
+  const captainPhone = String(req.query.captainPhone || "").replace(/[^0-9]/g, "").slice(-15);
+  const phrase = typeof req.query.phrase === "string" ? req.query.phrase.trim().slice(0, 80) : "";
+  if (!captainPhone || !phrase) return res.status(400).json({ error: "captainPhone and phrase are required" });
+
+  try {
+    const { error } = await supabase
+      .from("closure_expressions")
+      .delete()
+      .eq("captain_phone", captainPhone)
+      .eq("phrase", phrase);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Unable to delete closure expression" });
+  }
+});
+
 app.get("/", (req, res) => {
   res.json({
     service: "Orderi Server",
