@@ -1012,7 +1012,14 @@ export function registerAdminRoutes(
       const userId = String(req.params.id);
       const body = req.body || {};
       const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (body.username !== undefined) updates.phone = String(body.username).replace(/\D/g, "");
+      if (body.username !== undefined) {
+        const phone = String(body.username).replace(/\D/g, "");
+        if (!phone) return res.status(400).json({ success: false, error: "رقم الهاتف مطلوب." });
+        const { data: duplicate, error: duplicateError } = await db.from("captains").select("id").eq("phone", phone).neq("id", userId).maybeSingle();
+        if (duplicateError) return res.status(500).json({ success: false, error: duplicateError.message });
+        if (duplicate) return res.status(409).json({ success: false, error: "رقم الهاتف مستخدم في حساب آخر." });
+        updates.phone = phone;
+      }
       if (body.fullName !== undefined || body.full_name !== undefined) updates.name = String(body.fullName ?? body.full_name ?? "").trim();
       if (body.isActive !== undefined || body.is_active !== undefined) updates.is_active = Boolean(body.isActive ?? body.is_active);
       if (body.password !== undefined) {
