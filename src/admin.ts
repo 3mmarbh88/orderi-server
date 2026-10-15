@@ -978,6 +978,78 @@ export function registerAdminRoutes(
      USER STATUS
   ======================================================= */
 
+  app.post(
+    "/api/admin/users",
+    requireAdmin(db, async (req, res, auth) => {
+      const phone = String(req.body?.username || req.body?.phone || "").replace(/\D/g, "");
+      const name = String(req.body?.fullName || req.body?.name || phone).trim();
+      const password = String(req.body?.password || "");
+      if (!phone || password.length < 6) return res.status(400).json({ success: false, error: "رقم الهاتف وكلمة مرور لا تقل عن 6 أحرف مطلوبان." });
+      const { data: existing, error: findError } = await db.from("captains").select("id").eq("phone", phone).maybeSingle();
+      if (findError) return res.status(500).json({ success: false, error: findError.message });
+      if (existing) return res.status(409).json({ success: false, error: "رقم الهاتف مسجل مسبقاً." });
+      const salt = crypto.randomBytes(16);
+      const key = crypto.scryptSync(password, salt, 64);
+      const passwordHash = `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
+      const days = Math.min(3650, Math.max(1, Number(req.body?.days || 30)));
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+      const { data: user, error } = await db.from("captains").insert({
+        phone, name, password_hash: passwordHash, vehicle_type: "car",
+        is_active: true, is_activated: true, activated_at: now.toISOString(),
+        expires_at: expiresAt, license_plan: `${days} يوم`,
+        biometrics_enabled: true
+      }).select("*").single();
+      if (error || !user) return res.status(500).json({ success: false, error: error?.message || "تعذر إنشاء الحساب." });
+      const { error: subscriptionError } = await db.from("user_subscriptions").insert({
+        user_id: user.id,
+        starts_at: now.toISOString(),
+        expires_at: expiresAt,
+        is_active: true,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString()
+      });
+      if (subscriptionError) {
+        await db.from("captains").delete().eq("id", user.id);
+        return res.status(500).json({ success: false, error: `تعذر حفظ اشتراك المستخدم: ${subscriptionError.message}` });
+      }
+      await writeLog(db, "USER_CREATED", phone, user.id, `تم إنشاء حساب مستخدم بواسطة ${auth.admin.username}`, "success", req);
+      return res.status(201).json({ success: true, user: { ...user, password_hash: undefined } });
+    })
+  );
+
+  app.patch(
+    "/api/admin/users/:id",
+    requireAdmin(db, async (req, res, auth) => {
+      const userId = String(req.params.id);
+      const body = req.body || {};
+      const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (body.username !== undefined) {
+        const phone = String(body.username).replace(/\D/g, "");
+        if (!phone) return res.status(400).json({ success: false, error: "رقم الهاتف مطلوب." });
+        const { data: duplicate, error: duplicateError } = await db.from("captains").select("id").eq("phone", phone).neq("id", userId).maybeSingle();
+        if (duplicateError) return res.status(500).json({ success: false, error: duplicateError.message });
+        if (duplicate) return res.status(409).json({ success: false, error: "رقم الهاتف مستخدم في حساب آخر." });
+        updates.phone = phone;
+      }
+      if (body.fullName !== undefined || body.full_name !== undefined) updates.name = String(body.fullName ?? body.full_name ?? "").trim();
+      if (body.isActive !== undefined || body.is_active !== undefined) updates.is_active = Boolean(body.isActive ?? body.is_active);
+      if (body.password !== undefined) {
+        const password = String(body.password);
+        if (password.length < 6) return res.status(400).json({ success: false, error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل." });
+        const salt = crypto.randomBytes(16);
+        const key = crypto.scryptSync(password, salt, 64);
+        updates.password_hash = `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
+      }
+      if (Object.keys(updates).length === 1) return res.status(400).json({ success: false, error: "لا توجد تغييرات مدعومة لحفظها." });
+      const { data: user, error } = await db.from("captains").update(updates).eq("id", userId).select("*").maybeSingle();
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (!user) return res.status(404).json({ success: false, error: "المستخدم غير موجود." });
+      await writeLog(db, "USER_UPDATED", user.phone, user.id, `تم تعديل حساب المستخدم بواسطة ${auth.admin.username}`, "info", req);
+      return res.json({ success: true, user: { ...user, password_hash: undefined } });
+    })
+  );
+
   app.patch(
     "/api/admin/users/:id/status",
     requireAdmin(
