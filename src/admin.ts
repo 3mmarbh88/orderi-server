@@ -1001,6 +1001,18 @@ export function registerAdminRoutes(
         biometrics_enabled: true
       }).select("*").single();
       if (error || !user) return res.status(500).json({ success: false, error: error?.message || "تعذر إنشاء الحساب." });
+      const { error: subscriptionError } = await db.from("user_subscriptions").insert({
+        user_id: user.id,
+        starts_at: now.toISOString(),
+        expires_at: expiresAt,
+        is_active: true,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString()
+      });
+      if (subscriptionError) {
+        await db.from("captains").delete().eq("id", user.id);
+        return res.status(500).json({ success: false, error: `تعذر حفظ اشتراك المستخدم: ${subscriptionError.message}` });
+      }
       await writeLog(db, "USER_CREATED", phone, user.id, `تم إنشاء حساب مستخدم بواسطة ${auth.admin.username}`, "success", req);
       return res.status(201).json({ success: true, user: { ...user, password_hash: undefined } });
     })
