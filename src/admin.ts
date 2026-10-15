@@ -991,9 +991,13 @@ export function registerAdminRoutes(
       const salt = crypto.randomBytes(16);
       const key = crypto.scryptSync(password, salt, 64);
       const passwordHash = `scrypt$${salt.toString("hex")}$${key.toString("hex")}`;
+      const days = Math.min(3650, Math.max(1, Number(req.body?.days || 30)));
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
       const { data: user, error } = await db.from("captains").insert({
         phone, name, password_hash: passwordHash, vehicle_type: "car",
-        is_active: true, is_activated: false, license_plan: "بانتظار كود التفعيل",
+        is_active: true, is_activated: true, activated_at: now.toISOString(),
+        expires_at: expiresAt, license_plan: `${days} يوم`,
         biometrics_enabled: true
       }).select("*").single();
       if (error || !user) return res.status(500).json({ success: false, error: error?.message || "تعذر إنشاء الحساب." });
