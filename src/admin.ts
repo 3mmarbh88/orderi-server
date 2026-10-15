@@ -981,7 +981,7 @@ export function registerAdminRoutes(
   app.post(
     "/api/admin/users",
     requireAdmin(db, async (req, res, auth) => {
-      const phone = String(req.body?.username || req.body?.phone || "").replace(/\\D/g, "");
+      const phone = String(req.body?.username || req.body?.phone || "").replace(/\D/g, "");
       const name = String(req.body?.fullName || req.body?.name || phone).trim();
       const password = String(req.body?.password || "");
       if (!phone || password.length < 6) return res.status(400).json({ success: false, error: "رقم الهاتف وكلمة مرور لا تقل عن 6 أحرف مطلوبان." });
@@ -1012,7 +1012,7 @@ export function registerAdminRoutes(
       const userId = String(req.params.id);
       const body = req.body || {};
       const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (body.username !== undefined) updates.phone = String(body.username).replace(/\\D/g, "");
+      if (body.username !== undefined) updates.phone = String(body.username).replace(/\D/g, "");
       if (body.fullName !== undefined || body.full_name !== undefined) updates.name = String(body.fullName ?? body.full_name ?? "").trim();
       if (body.isActive !== undefined || body.is_active !== undefined) updates.is_active = Boolean(body.isActive ?? body.is_active);
       if (body.password !== undefined) {
