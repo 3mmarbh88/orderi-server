@@ -1371,7 +1371,24 @@ ${JSON.stringify(rawText)}
 });
 // Optional cloud parsing for Orderi's native Android app. The app sends message
 // content here only when the user explicitly enables cloud AI fallback.
+const cloudParseRate = new Map<string, { windowStart: number; count: number }>();
 app.post("/api/ai/cloud-parse-order", async (req: Request, res: Response) => {
+  const now = Date.now();
+  const clientKey = req.ip || req.socket.remoteAddress || "unknown";
+  if (cloudParseRate.size > 2000) {
+    for (const [key, value] of cloudParseRate.entries()) {
+      if (now - value.windowStart > 60_000) cloudParseRate.delete(key);
+    }
+  }
+  const current = cloudParseRate.get(clientKey);
+  if (!current || now - current.windowStart >= 60_000) {
+    cloudParseRate.set(clientKey, { windowStart: now, count: 1 });
+  } else if (current.count >= 12) {
+    return res.status(429).json({ success: false, error: "تم تجاوز حد طلبات التحليل السحابي مؤقتاً" });
+  } else {
+    current.count += 1;
+  }
+
   const rawText = typeof req.body?.rawText === "string" ? req.body.rawText.trim() : "";
   const senderName = typeof req.body?.senderName === "string" ? req.body.senderName.slice(0, 120) : "";
   const groupName = typeof req.body?.groupName === "string" ? req.body.groupName.slice(0, 160) : "";
